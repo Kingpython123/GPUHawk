@@ -12,6 +12,7 @@ Windows 桌面客户端 · Fluent 界面 · 微信推送 · 单文件 exe
 ![python](https://img.shields.io/badge/python-3.10%2B-3776AB)
 ![qt](https://img.shields.io/badge/UI-PySide6%20%2B%20Fluent-41CD52)
 ![license](https://img.shields.io/badge/license-GPLv3-blue)
+[![release](https://img.shields.io/github/v/release/Kingpython123/GPUHawk)](https://github.com/Kingpython123/GPUHawk/releases/latest)
 
 </div>
 
@@ -52,7 +53,9 @@ Windows 桌面客户端 · Fluent 界面 · 微信推送 · 单文件 exe
 
 ### 方式一：直接用 exe
 
-到 [Releases](../../releases) 下载 `GPUHawk.exe`（如果还没有发布版本，用下面的方式自己打包），双击运行。首次运行如果被 SmartScreen 拦截，点「更多信息 → 仍要运行」（exe 没有数字签名）。
+**[⬇ 下载 GPUHawk.exe](https://github.com/Kingpython123/GPUHawk/releases/latest/download/GPUHawk.exe)**（Windows 10/11，约 44 MB，不用装 Python），双击运行。历史版本见 [Releases](../../releases)。
+
+首次运行如果被 SmartScreen 拦截，点「更多信息 → 仍要运行」（exe 没有数字签名）。
 
 ### 方式二：从源码运行
 
