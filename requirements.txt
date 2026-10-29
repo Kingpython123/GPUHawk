@@ -1,0 +1,7 @@
+requests
+PySide6-Essentials>=6.8
+# 装 Fluent 组件时加 --no-deps，避免拉进完整 PySide6 / WebEngine（几百 MB）：
+#   pip install --no-deps PySide6-Fluent-Widgets PySideSix-Frameless-Window darkdetect
+PySide6-Fluent-Widgets
+PySideSix-Frameless-Window
+darkdetect
