@@ -119,18 +119,34 @@ class AutoDL:
     def idle_count(self, signs: list[str], gpu: str) -> int:
         return self.gpu_table(signs).get(gpu, {}).get("idle", 0)
 
-    def machines(self, signs: list[str], gpu: str, num: int) -> list[dict]:
-        data = self._call("POST", "/user/machine/list", json={
+    def _machine_page(self, signs: list[str], gpu: str, num: int, page: int = 1) -> dict:
+        """机器列表一页：{list, max_page, result_total, ...}。"""
+        return self._call("POST", "/user/machine/list", json={
             "charge_type": "payg",
             "default_order": True,
             "gpu_idle_num": num,
             "gpu_type_name": [gpu],
-            "page_index": 1,
+            "page_index": page,
             "page_size": 50,
             "region_sign_list": signs,
         }) or {}
+
+    def machines(self, signs: list[str], gpu: str, num: int) -> list[dict]:
+        data = self._machine_page(signs, gpu, num)
         result = [m for m in data.get("list") or [] if (m.get("gpu_idle_num") or 0) >= num]
         return sorted(result, key=lambda m: m.get("payg_price") or 0)
+
+    def find_machine(self, signs: list[str], gpu: str, machine_id: str, max_pages: int = 20) -> dict | None:
+        """按 machine_id 在「地区 + 型号」的机器列表里找一台，会翻页；找不到（下架/改型号）返回 None。"""
+        page = 1
+        while True:
+            data = self._machine_page(signs, gpu, 0, page)
+            for m in data.get("list") or []:
+                if m.get("machine_id") == machine_id:
+                    return m
+            if page >= min(int(data.get("max_page") or 1), max_pages):
+                return None
+            page += 1
 
     def create_payg(self, machine_id: str, num: int, image: str, private_image_uuid: str):
         return self._call("POST", "/order/instance/create/payg", json={

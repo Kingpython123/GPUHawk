@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import random
 import sys
@@ -40,6 +41,7 @@ THEMES = {"跟随系统": Theme.AUTO, "浅色": Theme.LIGHT, "深色": Theme.DAR
 IDLE_BG = QColor(34, 197, 94, 55)
 GIB = 1024 ** 3
 AUTODL, MORNAI = "AutoDL", "晨涧云"
+WATCH = "指定机器"  # 库存表里单独盯的 AutoDL 机器，地区列写「地区 / 机器名」
 # (显示名, 渠道, 输入框提示, 获取 key 的页面)
 PUSH_OPTIONS = [
     ("不推送", "", "", ""),
@@ -187,9 +189,11 @@ class MachineWorker(QThread):
 
 
 class GrabWorker(QThread):
-    """cfg.gpu 为空时不查 AutoDL；cfg.mornai_gpu 为空时不查晨涧云。自动开机只针对 AutoDL。"""
+    """cfg.gpu 为空时不查 AutoDL；cfg.mornai_gpu 为空时不查晨涧云；cfg.watched 是单独盯的机器。
+    自动开机只针对 AutoDL 型号。"""
     log = Signal(str)
     table = Signal(str, str, dict)
+    machine = Signal(dict, dict)  # (盯的机器, 最新机器数据；找不到为空 dict)
     round_done = Signal(int)
     succeeded = Signal(dict)
     auth_failed = Signal(str)
@@ -222,6 +226,17 @@ class GrabWorker(QThread):
                     emit_mornai(self.table)
                 except (requests.RequestException, RuntimeError, ValueError) as exc:
                     self.log.emit(f"晨涧云本轮出错：{exc}")
+            for w in list(self.cfg.watched) if not result else []:  # 拷一份，界面线程可能同时增删
+                signs = next((s for name, s in self.groups.values() if name == w["region"]), None)
+                if not signs or self._stop:
+                    continue
+                try:
+                    self.machine.emit(w, api.find_machine(signs, w["gpu"], w["machine_id"]) or {})
+                except core.AuthError as exc:
+                    self.auth_failed.emit(str(exc))
+                    return
+                except (requests.RequestException, RuntimeError, ValueError) as exc:
+                    self.log.emit(f"{w['region']} / {w['alias']} 本轮出错：{exc}")
             self.round_done.emit(rounds)
             if result:
                 self.succeeded.emit(result)
@@ -476,8 +491,10 @@ class Confetti(QWidget):
 class MachineDialog(MessageBoxBase):
     """双击库存行弹出的机器明细。"""
 
-    def __init__(self, title: str, worker: MachineWorker, parent=None):
+    def __init__(self, title: str, worker: MachineWorker, parent=None, on_watch=None):
         super().__init__(parent)
+        self.rows: list[dict] = []
+        self.on_watch = on_watch  # on_watch(机器 dict)：把选中的机器加入监控
         head = QHBoxLayout()
         head.addWidget(SubtitleLabel(title, self))
         head.addStretch()
@@ -499,9 +516,17 @@ class MachineDialog(MessageBoxBase):
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.setMinimumHeight(320)
         self.viewLayout.addWidget(self.table)
-        self.note = CaptionLabel("按单价从低到高排列，绿色为有空闲卡的机器", self)
+        self.note = CaptionLabel("按单价从低到高排列，绿色为有空闲卡的机器；选中一台可单独监控", self)
         self.note.setTextColor(QColor(96, 96, 96), QColor(200, 200, 200))
-        self.viewLayout.addWidget(self.note)
+        self.watch_btn = PushButton(FIF.VIEW, "监控这台", self)
+        self.watch_btn.setEnabled(False)
+        self.watch_btn.clicked.connect(self._watch_selected)
+        self.table.itemSelectionChanged.connect(
+            lambda: self.watch_btn.setEnabled(bool(self.on_watch) and self.table.currentRow() >= 0))
+        foot = QHBoxLayout()
+        foot.addWidget(self.note, 1)
+        foot.addWidget(self.watch_btn)
+        self.viewLayout.addLayout(foot)
 
         self.widget.setMinimumWidth(900)
         self.yesButton.setText("关闭")
@@ -510,8 +535,16 @@ class MachineDialog(MessageBoxBase):
         worker.done.connect(self._fill)
         worker.failed.connect(self._fail)
 
+    def _watch_selected(self):
+        row = self.table.currentRow()
+        if self.on_watch and 0 <= row < len(self.rows):
+            self.on_watch(self.rows[row])
+            self.watch_btn.setText("已加入监控")
+            self.watch_btn.setEnabled(False)
+
     def _fill(self, machines: list):
         self.ring.hide()
+        self.rows = machines
         self.table.setRowCount(len(machines))
         for i, m in enumerate(machines):
             idle = m.get("gpu_idle_num") or 0
@@ -572,6 +605,7 @@ class MainWindow(FluentWindow):
         self.prev_idle: dict[tuple[str, str], int] = {}
         self.region_btns: list[PillPushButton] = []
         self._rows: list[tuple] = []  # 当前表格每行对应的 (平台, 地区, 型号, ...)，双击时用
+        self.watched: list[dict] = []  # 单独盯的机器 {machine_id, alias, region, gpu}，_load_settings 里读回
         self.grab_worker: GrabWorker | None = None
         self._workers: list[QThread] = []
         self._quitting = False
@@ -689,6 +723,29 @@ class MainWindow(FluentWindow):
         self.region_card.viewLayout.setContentsMargins(20, 14, 20, 18)
         self.region_card.viewLayout.addWidget(box)
         ll.addWidget(self.region_card)
+
+        self.watch_card = section(HeaderCardWidget(left), "指定机器")
+        whint = CaptionLabel("有空闲就提醒 · 点击移除", self.watch_card)
+        whint.setTextColor(QColor(96, 96, 96), QColor(200, 200, 200))
+        self.watch_card.headerLayout.addStretch(1)
+        self.watch_card.headerLayout.addWidget(whint)
+        wview = QWidget(self.watch_card)
+        wl = QVBoxLayout(wview)
+        wl.setContentsMargins(0, 0, 0, 0)
+        # 空状态提示单独放，不进 FlowLayout：takeAllWidgets 会把里面的控件一起删掉
+        self.watch_empty = CaptionLabel("还没有。双击 AutoDL 库存行 → 选中机器 → 点「监控这台」", wview)
+        self.watch_empty.setWordWrap(True)
+        self.watch_empty.setTextColor(QColor(96, 96, 96), QColor(200, 200, 200))
+        wbox = QWidget(wview)
+        self.watch_flow = FlowLayout(wbox, needAni=False)
+        self.watch_flow.setContentsMargins(0, 0, 0, 0)
+        self.watch_flow.setHorizontalSpacing(8)
+        self.watch_flow.setVerticalSpacing(8)
+        wl.addWidget(self.watch_empty)
+        wl.addWidget(wbox)
+        self.watch_card.viewLayout.setContentsMargins(20, 14, 20, 18)
+        self.watch_card.viewLayout.addWidget(wview)
+        ll.addWidget(self.watch_card)
         ll.addStretch()
         body.addWidget(left)
 
@@ -878,6 +935,67 @@ class MainWindow(FluentWindow):
         self.theme_combo.setCurrentText(s.value("theme", "跟随系统"))
         regions = s.value("regions", []) or []
         self._saved_regions = {regions} if isinstance(regions, str) else set(regions)
+        try:
+            self.watched = json.loads(s.value("watched_machines", "[]") or "[]")
+        except ValueError:
+            self.watched = []
+        self._render_watch()
+
+    # ---------------- 指定机器
+
+    def _render_watch(self):
+        self.watch_flow.takeAllWidgets()
+        self.watch_empty.setVisible(not self.watched)
+        for w in self.watched:
+            btn = PushButton(FIF.CLOSE, f"{w['gpu']} · {w['region']} / {w['alias']}")
+            btn.setToolTip("点击移除")
+            btn.clicked.connect(lambda _=False, mid=w["machine_id"]: self._remove_watch(mid))
+            self.watch_flow.addWidget(btn)
+
+    def _add_watch(self, m: dict, region: str, gpu: str):
+        alias = m.get("machine_alias") or m["machine_id"]
+        if any(w["machine_id"] == m["machine_id"] for w in self.watched):
+            self.toast("info", "已经在监控了", f"{region} / {alias}")
+            return
+        # 运行中的 GrabWorker 拿的是同一个列表，加进去下一轮就开始查
+        self.watched.append({"machine_id": m["machine_id"], "alias": alias, "region": region, "gpu": gpu})
+        self.settings.setValue("watched_machines", json.dumps(self.watched, ensure_ascii=False))
+        self._render_watch()
+        self.toast("success", "已加入监控", f"{gpu} · {region} / {alias}" + ("，下一轮开始查" if self.grab_worker else "，点「开始」后生效"))
+
+    def _remove_watch(self, machine_id: str):
+        w = next((x for x in self.watched if x["machine_id"] == machine_id), None)
+        if not w:
+            return
+        self.watched.remove(w)
+        self.settings.setValue("watched_machines", json.dumps(self.watched, ensure_ascii=False))
+        self.inventory.pop((WATCH, f"{w['region']} / {w['alias']}", w["gpu"]), None)
+        self.prev_idle.pop((WATCH, machine_id), None)
+        self._render_watch()
+        self._render_table()
+
+    def _on_machine(self, w: dict, m: dict):
+        """单独盯的机器每轮的结果：进库存表，从没空闲变成有空闲时提醒一次。"""
+        label = f"{w['region']} / {w['alias']}"
+        if w not in self.watched:  # 这一轮查询途中被移除了
+            return
+        if not m:
+            if self.prev_idle.get((WATCH, w["machine_id"])) != -1:
+                self.log(f"没找到 {w['gpu']} {label}，可能已下架或换了型号")
+            self.prev_idle[(WATCH, w["machine_id"])] = -1
+            return
+        idle, total = m.get("gpu_idle_num") or 0, m.get("gpu_number") or 0
+        self.inventory[(WATCH, label, w["gpu"])] = (idle, total, f"{datetime.now():%H:%M:%S}")
+        was = self.prev_idle.get((WATCH, w["machine_id"]), 0)
+        self.prev_idle[(WATCH, w["machine_id"])] = idle
+        if idle > 0:
+            self.radar.ping()
+            if was <= 0:
+                price = (m.get("payg_price") or 0) / 1000
+                self.log(f"★ {w['gpu']} {label} 有 {idle}/{total} 张空闲 · ¥{price:.2f}/时/卡")
+                self._push(f"{w['gpu']} {w['alias']} 有空闲了",
+                           f"{label} 空闲 {idle}/{total} 张 · ¥{price:.2f}/时/卡，快去 autodl.com 租")
+        self._render_timer.start()
 
     def _save_settings(self):
         s = self.settings
@@ -1110,8 +1228,8 @@ class MainWindow(FluentWindow):
     def _render_table(self):
         targets = self._targets()
         rows = [(p, r, g, *v) for (p, r, g), v in self.inventory.items()
-                if (p == MORNAI or v[1] > 0)
-                and (not self.only_target_cb.isChecked() or g == targets[p])
+                if (p != AUTODL or v[1] > 0)
+                and (not self.only_target_cb.isChecked() or p == WATCH or g == targets.get(p))
                 and (not self.only_idle_cb.isChecked() or v[0] > 0)]
         rows.sort(key=lambda x: (-x[3], x[0], x[1], x[2]))
         self._rows = rows
@@ -1139,21 +1257,23 @@ class MainWindow(FluentWindow):
             t.resizeColumnToContents(col)
         t.setUpdatesEnabled(True)
 
-        if not self.inventory or not any(targets.values()):
+        if not self.inventory or not (any(targets.values()) or self.watched):
             self.stat_idle.set("-")
         else:
             cards, places = self._target_idle()
             self.stat_idle.set_number(cards, "{} 张" + (f" · {places} 处" if places else ""))
 
     def _target_idle(self, regions: list[str] | None = None) -> tuple[int, int]:
-        """目标型号空闲 (张数, 处数)。晨涧云的云主机/云容器像是同一卡池，取较大值、算一处。"""
+        """目标型号 + 指定机器的空闲 (张数, 处数)。晨涧云的云主机/云容器像是同一卡池，取较大值、算一处。
+        指定机器的空闲不和 AutoDL 地区汇总去重：同一台机器也在型号统计里时会算两次，影响不大。"""
         targets = self._targets()
         auto = [v[0] for (p, r, g), v in self.inventory.items()
                 if p == AUTODL and targets[AUTODL] and g == targets[AUTODL] and v[0] > 0
                 and (not regions or r in regions)]
+        watch = [v[0] for (p, r, g), v in self.inventory.items() if p == WATCH and v[0] > 0]
         morn = max((v[0] for (p, r, g), v in self.inventory.items()
                     if p == MORNAI and targets[MORNAI] and g == targets[MORNAI]), default=0)
-        return sum(auto) + morn, len(auto) + (1 if morn else 0)
+        return sum(auto) + sum(watch) + morn, len(auto) + len(watch) + (1 if morn else 0)
 
     def _on_round(self, n: int):
         """每轮结束：轮次滚动 + 趋势图记一个点（AutoDL 只算本次监控的地区）。"""
@@ -1168,11 +1288,14 @@ class MainWindow(FluentWindow):
         if platform == MORNAI:
             QDesktopServices.openUrl(QUrl(f"https://www.mornai.cn/store/detail?name={gpu}"))
             return
+        if platform == WATCH:
+            region = region.split(" / ")[0]
         signs = next((s for name, s in self.groups.values() if name == region), None)
         if not signs or not self.token:
             return
         w = MachineWorker(self.token, self.sub_user_sw.isChecked(), signs, gpu)
-        dlg = MachineDialog(f"{region} · {gpu} · 显存 {fmt_gb(self.catalog.get(gpu, 0))}", w, self)
+        dlg = MachineDialog(f"{region} · {gpu} · 显存 {fmt_gb(self.catalog.get(gpu, 0))}", w, self,
+                            on_watch=lambda m: self._add_watch(m, region, gpu))
         self._run(w)
         dlg.exec()
         for sig in (w.done, w.failed):
@@ -1195,13 +1318,13 @@ class MainWindow(FluentWindow):
         gpu = self.gpu_combo.text().strip()
         mornai_gpu = self._mornai_target()
         buy = self.mode_seg.currentRouteKey() == "buy"
-        if not gpu and not mornai_gpu:
-            self.toast("warning", "还没选型号", "AutoDL 和晨涧云至少选一个")
+        if not gpu and not mornai_gpu and not self.watched:
+            self.toast("warning", "还没选监控目标", "AutoDL 型号、晨涧云型号、指定机器至少选一个")
             return
         if buy and not gpu:
-            self.toast("warning", "自动开机只支持 AutoDL", "选一个 AutoDL 型号，或切到「只监控提醒」")
+            self.toast("warning", "自动开机只支持 AutoDL 型号", "选一个 AutoDL 型号，或切到「只监控提醒」")
             return
-        if gpu:
+        if gpu or self.watched:
             if not self.token:
                 self.toast("warning", "还没有 AutoDL token", "到「设置」里填写并保存；只看晨涧云可以把 AutoDL 型号清空")
                 self.switchTo(self.settings_page)
@@ -1209,12 +1332,13 @@ class MainWindow(FluentWindow):
             if not self.groups:
                 self.toast("warning", "地区列表还没加载好", "稍等或点「刷新」")
                 return
-            if gpu not in self.catalog:
-                self.toast("warning", "未知型号", f"{gpu!r} 不在 AutoDL 型号列表里，请从下拉中选")
-                return
+        if gpu and gpu not in self.catalog:
+            self.toast("warning", "未知型号", f"{gpu!r} 不在 AutoDL 型号列表里，请从下拉中选")
+            return
         regions = self._checked_regions()
         cfg = SimpleNamespace(
-            gpu=gpu, mornai_gpu=mornai_gpu, num=self.num_spin.value(), max_price=self.price_spin.value(),
+            gpu=gpu, mornai_gpu=mornai_gpu, watched=self.watched,  # watched 共享同一个列表，运行中增删实时生效
+            num=self.num_spin.value(), max_price=self.price_spin.value(),
             region=regions or None, image=self.image_edit.text().strip() or core.DEFAULT_IMAGE,
             private_image=self.private_edit.text().strip(), interval=self.interval_spin.value(),
             dry_run=self.mode_seg.currentRouteKey() != "buy", sub_user=self.sub_user_sw.isChecked(),
@@ -1235,6 +1359,7 @@ class MainWindow(FluentWindow):
         self.grab_worker = GrabWorker(self.token, cfg, self.groups)
         self.grab_worker.log.connect(self.log)
         self.grab_worker.table.connect(self._on_table)
+        self.grab_worker.machine.connect(self._on_machine)
         self.grab_worker.round_done.connect(self._on_round)
         self.trend.clear()
         self.grab_worker.succeeded.connect(self._on_success)
@@ -1252,6 +1377,8 @@ class MainWindow(FluentWindow):
             parts.append(f"AutoDL {cfg.gpu} × {cfg.num}（{'、'.join(cfg.region or []) or '全部地区'}）")
         if cfg.mornai_gpu:
             parts.append(f"晨涧云 {self._gpu_label(MORNAI, cfg.mornai_gpu)}")
+        if cfg.watched:
+            parts.append(f"指定机器 {len(cfg.watched)} 台")
         return " + ".join(parts)
 
     def _set_running(self, running: bool, cfg: SimpleNamespace | None = None):

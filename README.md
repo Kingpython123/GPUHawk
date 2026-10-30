@@ -33,6 +33,7 @@ Windows 桌面客户端 · Fluent 界面 · 微信推送 · 单文件 exe
 | 🦅 **多平台** | AutoDL（按地区、按型号）+ 晨涧云（云主机 / 云容器），同一张表里看 |
 | 📊 **实时库存** | 每个地区每个型号的空闲 / 总数、显存；有空闲的行高亮 |
 | 🔍 **机器明细** | 双击 AutoDL 一行，看每台机器的每卡 CPU、内存、单价、最高 CUDA、CPU 型号 |
+| 🎯 **盯指定机器** | 在机器明细里选中某台（如 西北B区 / 727机）点「监控这台」，这台一有空闲就提醒 |
 | ⚡ **自动开机** | 只针对 AutoDL；价格上限、地区、卡数、镜像（公共 / 私有）可配；开机前二次确认 |
 | 💬 **微信提醒** | PushPlus、WxPusher、Server酱、企业微信群机器人四选一，带「发送测试」 |
 | 📈 **空闲趋势** | 每轮采样画曲线，看出这款卡什么时候容易放出来 |
@@ -95,7 +96,8 @@ token 保存在程序旁边的 `.env` 里，有效期约两个月，界面上会
 - **AutoDL 型号**：下拉或输入搜索；留空表示不监控 AutoDL；
 - **晨涧云型号**：选「不监控」则不看晨涧云；
 - 卡数、每卡价格上限、轮询间隔、地区（不选 = 全部）；
-- 顶部切「只监控提醒 / 有卡自动开机」，点「开始」。
+- **指定机器**（可选）：双击 AutoDL 库存行打开机器明细，选中一台点「监控这台」，左侧「指定机器」卡片里点一下即可移除；只盯指定机器时两个型号都可以不选；
+- 顶部切「只监控提醒 / 有卡自动开机」，点「开始」。自动开机只针对 AutoDL 型号，指定机器目前只提醒。
 
 ### 3. 微信提醒（可选）
 
@@ -129,7 +131,7 @@ python gpuhawk_core.py --gpu "RTX 4090" --num 1 --max-price 2.5 --region 北京B
 |---|---|---|---|
 | AutoDL | 型号 / 地区 | `GET /api/v1/machine/gpu_type`、`/api/v1/region/list` | 否 |
 | AutoDL | 各地区各型号空闲 | `POST /api/v1/machine/region/gpu_type` | 是 |
-| AutoDL | 机器明细 | `POST /api/v1/user/machine/list` | 是 |
+| AutoDL | 机器明细 / 指定机器 | `POST /api/v1/user/machine/list`（按 `machine_id` 翻页查找） | 是 |
 | AutoDL | 按量开机 | `POST /api/v1/order/instance/create/payg` | 是 |
 | 晨涧云 | 各型号空闲 | `GET api.mornai.cn/app-api/{cloud,container}/resource/gpu/count`（头 `tenant-id: 1`） | 否 |
 
